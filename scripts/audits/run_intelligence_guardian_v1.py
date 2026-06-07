@@ -19,10 +19,66 @@ import pandas as pd
 
 DEFAULT_CLUSTERS = ["SC002", "SC006", "SC161", "SC191"]
 AUDIT_DATE = pd.Timestamp("2026-06-07", tz="UTC")
+REQUIRED_WORKSPACE_FIELDS = [
+    "workspace_root",
+    "engine_repo",
+    "public_repo",
+    "ops_repo",
+    "hq_repo",
+    "audit_outputs",
+]
 
 
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+def default_workspace_config_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "config" / "workspace.yaml"
+
+
+def parse_simple_yaml(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" not in line:
+                raise ValueError(f"{path}:{line_number} must use 'key: value' format.")
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if not key or not value:
+                raise ValueError(f"{path}:{line_number} has an empty key or value.")
+            values[key] = value
+    return values
+
+
+def load_workspace(config_path: Path | None = None) -> dict[str, Path]:
+    path = config_path or default_workspace_config_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Workspace config not found: {path}\n"
+            "Create vidcluster_ops/config/workspace.yaml or pass --workspace-config."
+        )
+
+    raw_config = parse_simple_yaml(path)
+    missing_fields = [field for field in REQUIRED_WORKSPACE_FIELDS if field not in raw_config]
+    if missing_fields:
+        raise ValueError(
+            f"Workspace config is missing required field(s): {', '.join(missing_fields)}\n"
+            f"Config path: {path}"
+        )
+
+    workspace = {key: Path(value).expanduser().resolve() for key, value in raw_config.items()}
+    missing_paths = [
+        f"{field}: {workspace[field]}"
+        for field in REQUIRED_WORKSPACE_FIELDS
+        if not workspace[field].exists()
+    ]
+    if missing_paths:
+        raise FileNotFoundError(
+            "Workspace config points to missing path(s):\n"
+            + "\n".join(f"- {item}" for item in missing_paths)
+        )
+    return workspace
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -52,10 +108,9 @@ def latest_dated_file(base: Path, filename: str) -> Path:
     return sorted(candidates, key=lambda item: item[0])[-1][1]
 
 
-def latest_micro_assignments(root: Path) -> Path:
+def latest_micro_assignments(engine_repo: Path) -> Path:
     tracking_root = (
-        root
-        / "vidcluster_engine"
+        engine_repo
         / "automation-data"
         / "experiments"
         / "v4_0"
@@ -92,10 +147,9 @@ def latest_micro_assignments(root: Path) -> Path:
     raise FileNotFoundError("No micro assignment artifact found.")
 
 
-def latest_weekly_additions(root: Path) -> tuple[Path, pd.Timestamp]:
+def latest_weekly_additions(engine_repo: Path) -> tuple[Path, pd.Timestamp]:
     additions_root = (
-        root
-        / "vidcluster_engine"
+        engine_repo
         / "automation-data"
         / "experiments"
         / "v4_0"
@@ -181,19 +235,26 @@ def trust_status(creator_count: int, video_count: int, top_views: float, median_
     return "Weak"
 
 
-def load_cluster_frame(root: Path, clusters: list[str]) -> tuple[pd.DataFrame, dict[str, str]]:
-    micro_path = latest_micro_assignments(root)
+def display_path(path: Path, workspace_root: Path) -> str:
+    try:
+        return str(path.relative_to(workspace_root))
+    except ValueError:
+        return str(path)
+
+
+def load_cluster_frame(workspace: dict[str, Path], clusters: list[str]) -> tuple[pd.DataFrame, dict[str, str]]:
+    engine_repo = workspace["engine_repo"]
+    workspace_root = workspace["workspace_root"]
+    micro_path = latest_micro_assignments(engine_repo)
     universe_path = (
-        root
-        / "vidcluster_engine"
+        engine_repo
         / "automation-data"
         / "experiments"
         / "v4_0"
         / "v4_0_videos_universe.csv"
     )
     tracking_path = latest_dated_file(
-        root
-        / "vidcluster_engine"
+        engine_repo
         / "automation-data"
         / "experiments"
         / "v4_0"
@@ -253,16 +314,20 @@ def load_cluster_frame(root: Path, clusters: list[str]) -> tuple[pd.DataFrame, d
     df["views_per_day"] = df["view_count"] / df["age_days"]
 
     paths = {
-        "micro_assignments": str(micro_path.relative_to(root)),
-        "video_universe": str(universe_path.relative_to(root)),
-        "video_tracking": str(tracking_path.relative_to(root)),
+        "micro_assignments": display_path(micro_path, workspace_root),
+        "video_universe": display_path(universe_path, workspace_root),
+        "video_tracking": display_path(tracking_path, workspace_root),
     }
     return df, paths
 
 
-def load_weekly_frame(root: Path, clusters: list[str], cluster_frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
-    weekly_path, snapshot_date = latest_weekly_additions(root)
-    live_universe_path = root / "vidcluster_engine" / "automation-data" / "live" / "latest_video_universe.csv"
+def load_weekly_frame(
+    workspace: dict[str, Path], clusters: list[str], cluster_frame: pd.DataFrame
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    engine_repo = workspace["engine_repo"]
+    workspace_root = workspace["workspace_root"]
+    weekly_path, snapshot_date = latest_weekly_additions(engine_repo)
+    live_universe_path = engine_repo / "automation-data" / "live" / "latest_video_universe.csv"
 
     weekly = pd.read_parquet(weekly_path)
     live_universe = pd.read_csv(live_universe_path)
@@ -306,8 +371,8 @@ def load_weekly_frame(root: Path, clusters: list[str], cluster_frame: pd.DataFra
     df["tier"] = df.apply(classify_tier, axis=1)
 
     paths = {
-        "weekly_additions": str(weekly_path.relative_to(root)),
-        "live_video_universe": str(live_universe_path.relative_to(root)),
+        "weekly_additions": display_path(weekly_path, workspace_root),
+        "live_video_universe": display_path(live_universe_path, workspace_root),
         "weekly_snapshot_date": snapshot_date.strftime("%Y-%m-%d"),
     }
     return df, paths
@@ -539,16 +604,29 @@ def write_markdown(path: Path, rows: list[dict[str, Any]], source_paths: dict[st
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run VidCluster Intelligence Guardian V1.")
     parser.add_argument("--clusters", nargs="*", default=DEFAULT_CLUSTERS)
+    parser.add_argument(
+        "--workspace-config",
+        type=Path,
+        default=None,
+        help="Path to workspace.yaml. Defaults to vidcluster_ops/config/workspace.yaml.",
+    )
     args = parser.parse_args()
     clusters = args.clusters or DEFAULT_CLUSTERS
 
-    root = repo_root()
-    output_dir = root / "audit_outputs" / "intelligence_guardian_v1"
+    workspace = load_workspace(args.workspace_config)
+    output_dir = workspace["audit_outputs"] / "intelligence_guardian_v1"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cluster_frame, cluster_paths = load_cluster_frame(root, clusters)
-    weekly_frame, weekly_paths = load_weekly_frame(root, clusters, cluster_frame)
-    source_paths = {**cluster_paths, **weekly_paths}
+    cluster_frame, cluster_paths = load_cluster_frame(workspace, clusters)
+    weekly_frame, weekly_paths = load_weekly_frame(workspace, clusters, cluster_frame)
+    source_paths = {
+        "workspace_config": display_path(
+            args.workspace_config.resolve() if args.workspace_config else default_workspace_config_path(),
+            workspace["workspace_root"],
+        ),
+        **cluster_paths,
+        **weekly_paths,
+    }
 
     rows = [analyze_cluster(cluster_id, cluster_frame, weekly_frame) for cluster_id in clusters]
 

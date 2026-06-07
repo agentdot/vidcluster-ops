@@ -1,0 +1,6 @@
+workspace_root: D:/Projects/vidcluster
+engine_repo: D:/Projects/vidcluster/vidcluster_engine
+public_repo: D:/Projects/vidcluster/vidcluster_public
+ops_repo: D:/Projects/vidcluster/vidcluster_ops
+hq_repo: D:/Projects/vidcluster/VidCluster HQ
+audit_outputs: D:/Projects/vidcluster/audit_outputs
